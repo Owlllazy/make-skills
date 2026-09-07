@@ -1,373 +1,211 @@
 ---
 name: make-scenario-building
-description: This skill should be used when designing Make scenarios, choosing which modules to use, composing module flows, setting up routing/branching/filtering/iterations/aggregations, building blueprints, deploying scenarios, handling errors, configuring scheduling and triggers, or discussing scenario architecture. Covers WHICH modules to use and WHY — complementary to make-module-configuring which covers HOW to configure each module.
-license: MIT
-compatibility: Requires a Make.com account with permissions to create scenarios. Works with any agent that supports MCP (Claude Code, Cursor, GitHub Copilot, etc.).
+description: Use when finding Make apps or modules for a goal, resolving or requesting a connection, creating a scenario, or editing its structure or module configuration. Covers app_find, module_spec, module_options_get, connection_create, connection_get, scenario_create, and scenario_patch. Not for explaining an already-built scenario (see make-scenario-explore) or running/debugging one (see make-scenario-operations). Read make-scenario-reference first for scopes, the write model, and the refusal contract.
 metadata:
-  author: Make
   version: "0.1.7" # x-release-please-version
-  homepage: https://www.make.com
-  repository: https://github.com/integromat/make-skills
 ---
 
-# Make Scenario Building
-
-This skill guides building a scenario in Make. A scenario is an automated workflow composed of modules connected together. Before building anything, Phase 1 below MUST be completed.
-
-Known Make module id: the Make Code module is `"module": "code:ExecuteCode"`.
-
-## Phase 1: Understand the Business Need & Identify Modules
-
-Phase 1 has three steps. Do not skip or rush any of them.
-
-### Step 1: Clarify the Business Use Case
-
-The first job is to understand exactly what the user wants to automate. Use an adaptive interview approach:
-
-1. **Start conversational.** Ask 1-2 focused questions about what they want to achieve:
-   - What task or process do they want to automate?
-   - Which systems or services are involved?
-
-2. **Drill deeper based on answers.** Once the basics are clear, clarify:
-   - What triggers the automation? (time interval, webhook, manual execution)
-   - What data moves between systems and in which direction?
-   - Are there any conditions, branching logic, or error handling needs?
-
-3. **If answers are vague, get structured.** Ask explicitly:
-   - "What is the source system and what data are you pulling from it?"
-   - "What is the destination system and what should happen there?"
-   - "Should this run on a schedule, on-demand, or when an event occurs?"
-
-**CRITICAL — Provider disambiguation (MUST follow):** When the user mentions a generic category OR describes a capability without naming a specific app, the agent MUST ask which provider/service they use BEFORE proceeding to Step 2. Never assume a provider.
-
-Common ambiguous categories and their possible providers (non-exhaustive — apply the same logic to any category not listed):
-- **Forms/surveys:** Google Forms, Typeform, JotForm, Tally, Microsoft Forms, SurveyMonkey, ...
-- **AI/LLM:** OpenAI, Anthropic, Google AI, Make AI, Azure OpenAI, Cohere, ...
-- **Email:** Gmail, Outlook, SendGrid, Mailchimp, SMTP, ...
-- **Calendar:** Google Calendar, Outlook Calendar, Calendly, ...
-- **Cloud storage:** Google Drive, Dropbox, OneDrive, Box, ...
-- **CRM:** Salesforce, HubSpot, Pipedrive, Zoho CRM, ...
-- **Databases:** Airtable, Google Sheets, PostgreSQL, MySQL, MongoDB, ...
-- **Project management:** Jira, Asana, Monday.com, Trello, ClickUp, Linear, ...
-- **Messaging/chat:** Slack, Discord, Microsoft Teams, Telegram, ...
-
-This also applies when the user describes a **capability** rather than naming an app. Words like "summarize", "analyze sentiment", "feedback form", "send a notification", or "store data" describe what they want to do — not which service to use. Ask.
-
-> **Bad:** User says "list responses from my feedback form and post a sentiment summary into Discord." Agent assumes Google Forms and OpenAI and proceeds.
-> **Good:** Same request. Agent asks: "Which form tool holds your responses — Google Forms, Typeform, JotForm, or something else? And for sentiment analysis, do you want to use OpenAI, Anthropic, Make AI, or another AI service?"
-
-Different providers have different modules, capabilities, and connection requirements — guessing wastes time and produces wrong blueprints.
-
-Continue until the use case can be clearly articulated in one paragraph. Every app in the scenario must be explicitly identified by name — if any app is still a generic category or implied by a capability description, ask before proceeding. Do NOT proceed to Step 2 until the business need is fully understood.
-
-### Step 2: Identify Make Modules
-
-Once the use case is clear, map it to Make modules using the MCP tools available from the Make MCP server:
-
-1. **Find relevant apps.** Use the `apps_recommend` tool (or a similarly named tool if unavailable) with a description of the user's need. This returns recommended Make apps for the involved systems.
-   - **One app per call.** Never batch multiple apps in a single `apps_recommend` call. Call separately for each distinct app/service. These calls can run in parallel.
-
-2. **List available modules.** For each relevant app, use the `app_modules_list` tool (or similarly named) to see what modules (triggers, actions, searches, transformers) are available. Pass the `appVersion` returned by `apps_recommend`.
-
-3. **Get app documentation.** For each app, call `app_documentation_get` using the exact `appName` value returned by `apps_recommend` (do not abbreviate or modify it). This returns detailed capabilities and module descriptions. Call once per app, not per module.
-
-4. **Select modules.** Pick the specific modules needed:
-   - **Trigger module** — what starts the scenario (e.g., Watch New Rows, Webhook, Schedule). Instant/webhook triggers are generally preferred when available — they're faster and use fewer operations (see [Webhooks Gotchas](./webhooks.md#gotchas)) — but they're significantly harder to verify end-to-end after deployment, see "Webhook Scenarios: Verifying via `scenarios_run` Is Unreliable" below. Weigh that tradeoff explicitly: use a webhook trigger when the user needs real-time delivery or the source system only offers webhooks; otherwise, if a polling "Watch..." module or Schedule is available and verifiability matters more than the operations/latency savings, prefer that instead.
-   - **Action modules** — what the scenario does (e.g., Create Record, Send Message, Update Row)
-   - **Utility modules** — if needed for data transformation, iteration, aggregation, routing, or error handling
-
-If a tool is not found by exact name, search for similarly named tools on the Make MCP server. The key capability needed is: recommending apps and listing their modules.
-
-**Module name verification:** Never guess module names. Always verify via `app_modules_list`. Case and spelling must match exactly.
-
-**No scheduler module:** There is no scheduler module in Make. Scheduling is a scenario-level setting, not a module. The scenario always starts with the first module (trigger or action). Scheduling is configured separately via the `scenario_scheduling_update` tool.
-
-**IMPORTANT:** As modules are identified, record the following details from the tool responses — they are needed in subsequent phases:
-- **App name** (exact name as returned by the tool)
-- **App version** (exact version as returned by the tool)
-- **Module name** (exact technical name/slug of each module you plan to use)
-
-### Step 2.5: Look Up Reference Templates
-
-Once apps and modules are identified, search the Make public template library for similar scenarios. Studying an existing template's blueprint reveals canonical module versions, mapper shapes, and aggregator/feeder bindings that aren't visible from `app-module_get` alone.
-
-**Recommended whenever the planned flow includes:**
-- An aggregator (`util:TextAggregator`, `builtin:BasicAggregator`, etc.)
-- A Make AI Tools module or any AI provider module
-- An app you haven't configured earlier in this session
-- Multi-module composition (more than 2-3 modules, branching, iteration)
-
-**Skip allowed for** single-module trigger → single-action flows with well-known apps and no aggregation/AI.
-
-**How:**
-1. `public-templates_list` with `name: <use-case keywords>` and `usedApps: <app slugs from Step 2>`
-2. If matches found, pick the highest-`usage` one with the most app overlap
-3. `public-templates_get-blueprint` to fetch the full structure
-4. Use as STRUCTURAL reference — NOT as the literal blueprint to copy. Templates often implement a slightly different pattern (e.g., per-item loop vs digest-style aggregation). Note diffs and present them to the user in Step 3.
-
-If `public-templates_get*` returns "Organization-bound request can't be used outside of the Organization Context", retry once; if it persists, reconnect the Make MCP server (`/mcp` reauth) and retry. If still failing, proceed without — the template is a nice-to-have reference, not a requirement.
-
-See [Templates Lookup](./templates-lookup.md) for search patterns, blueprint-diffing tips, and MCP workarounds. The top 10 most-used public templates are also kept locally under [examples/popular-templates/](./examples/popular-templates/) — check there first when the user's request is a near-match for a common automation (e.g., AI enrichment of Sheets rows, webhook → Sheets, chatbot reply) and skip the remote round-trip.
-
-### Step 3: Present the Module Composition & Get Confirmation
-
-Present the proposed module sequence to the user using **flowchart notation**:
-
-**Linear flow:**
-```
-Trigger: Google Sheets - Watch New Rows → Slack - Send Message → Google Drive - Upload File
-```
-
-**Branching flow (with If-Else + Merge) — mutually exclusive branches that converge:**
-```
-Trigger: Webhook → HTTP - Make a Request → If-Else
-  ├─ If (status = "success"): Slack - Send Message
-  └─ Else: Email - Send Error
-→ Merge → Google Sheets - Log Result
-```
-
-**Branching flow (with Router) — multiple branches can fire, no convergence:**
-```
-Trigger: Webhook → HTTP - Make a Request → Router
-  ├─ Route A (status = success): Slack - Send Message
-  └─ Route B (priority = high): Email - Send Alert
-```
-
-**Flow with iteration:**
-```
-Trigger: Schedule → Google Sheets - Search Rows → Iterator → Slack - Send Message (for each row)
-```
-
-For each module in the sequence, briefly note:
-- The app and module name
-- What it does in this scenario (1 sentence)
-
-Then ask the user: **"Does this module composition achieve what you need? Should I adjust any steps?"**
-
-Do NOT proceed beyond Phase 1 until the user confirms the composition is correct. The literal scenario layout and module configuration will be handled in subsequent phases.
-
-### Phase 1 Output
-
-Once the user confirms, produce a **Scenario Plan** summary to carry into subsequent phases. This is the working reference — do not lose it.
-
-```
-## Scenario Plan
-
-**Use case:** <one paragraph summary>
-**Trigger type:** <schedule | webhook | manual | event-based>
-
-### Modules
-
-| # | App | App Version | Module (slug) | Module Label | Role in scenario |
-|---|-----|-------------|---------------|--------------|------------------|
-| 1 | ... | ...         | ...           | ...          | ...              |
-| 2 | ... | ...         | ...           | ...          | ...              |
-
-### Flow
-<flowchart notation from Step 3>
-```
-
-This table is the source of truth for which apps and modules will be used. Subsequent phases will reference it directly.
-
-**CRITICAL — Plan adherence:** Once the user confirms the Scenario Plan, treat it as a binding contract. If during Phase 2 a reason emerges to change the module composition, flow structure, or branching pattern (e.g., switching from If-Else + Merge to Router, adding or removing modules, changing the trigger type), STOP and present the proposed change to the user with a clear explanation of why, along with an updated plan summary highlighting what has changed. Do NOT silently deviate from the confirmed plan.
-
----
-
-## Phase 2: Configure, Deploy & Verify
-
-Once the user confirms the module composition from Phase 1, proceed through these steps:
-
-### Step 1: Secure Connections (REQUIRED — never auto-select)
-
-**CRITICAL — STOP and ask before proceeding.** This is an interactive checkpoint. For EVERY app that needs a connection — even if only one matching connection exists — list the options and ask the user which connection to use. Do NOT auto-select a connection. Do NOT call any module-specific RPCs (`rpc_execute` for spreadsheet lists, channel lists, folder lists, etc.) until the user has explicitly confirmed a connection for every app. This is a hard gate: no confirmation, no RPCs.
-
-1. **Extract connection requirements.** Before checking connections, call `extract_blueprint_components` with the unconfigured blueprint (all modules placed, parameters empty). This returns the authoritative list of: which modules need connections, the connection type for each, and the required OAuth scopes. Use this output — not manual inspection of the Scenario Plan — as the definitive checklist. Builtin modules (`builtin:BasicRouter`, `builtin:BasicFeeder`, `json:ParseJSON`, etc.) do NOT need connections. AI agent modules (`ai-local-agent:RunLocalAIAgent`) are NOT builtin — they require an AI provider connection via `makeConnectionId`.
-
-2. **Check existing connections (with scope verification).** Call `connections_list` with the target `teamId`. List all connections without a type filter first, then match by `accountName` in the results — the `type` filter matches `accountName`, NOT the Make app name (e.g., Google Sheets uses `"google"`, Gmail uses `"google-email"`, Slack uses `"slack2"` or `"slack3"`).
-
-   **Scope verification (CRITICAL for OAuth connections):** For each matching connection, compare its scopes against the required scopes from `extract_blueprint_components`. A connection that authenticates successfully but lacks a required scope will cause 403/permission errors at runtime. If a matching connection exists but its scopes are insufficient, do NOT attempt to use it — either expand its scopes (see `make-module-configuring` skill, connections reference, Step 3a) or create a new connection with the correct scopes.
-
-3. **Ask the user to pick.** For each app, present a numbered list and WAIT for the user's reply:
-   - **If matching connections exist** (even just one), list ALL of them with name, ID, metadata (email, workspace), and **scope status** (sufficient / insufficient). Always include "Create a new connection" as the last option:
-     ```
-     I found these existing Google connections:
-     1. "Google - Marketing" (ID: 12345, email: marketing@acme.com) — scopes: sufficient
-     2. "Google - Personal" (ID: 12346, email: me@gmail.com) — scopes: insufficient (missing Google Drive file access)
-     3. Create a new connection
-
-     Which one should I use for Google Sheets?
-     ```
-     **Even if there is only one match, still ask.** Connections with insufficient scopes should be listed but flagged — offer scope expansion or new connection creation for those.
-   - **If no matching connection exists**, inform the user and create a credential request via `credential_requests_create`, including the required scopes from `extract_blueprint_components`.
-
-4. **Confirm all connections are ready.** Do NOT proceed to Step 2 until every required connection has a user-confirmed connection ID.
-
-### Step 2: Configure Each Module
-
-Configure modules **left to right** (upstream to downstream) following the `make-module-configuring` skill:
-1. Read the module interface (`app-module_get` with instructions format)
-2. Load dynamic field options via RPCs (now that connections are confirmed)
-3. Fill parameters and mapper
-4. Validate each module individually (`validate_module_configuration`)
-
-### Step 3: Validate the Blueprint
-
-Call `validate_blueprint_schema` on the complete blueprint JSON to catch structural issues before submission.
-
-### Step 4: Create the Scenario
-
-Call `scenarios_create` with the validated blueprint. The blueprint **must** include a top-level `metadata` object — see [Blueprint Construction — Deployment Checklist](./blueprint-construction.md) for the required structure.
-
-> **Scheduling type for webhook/instant trigger scenarios:** When the first module is a webhook or instant trigger (`listener: true`), always use `{"type": "immediately"}` as the scheduling type when calling `scenario_scheduling_update`. Never use `"indefinitely"` for webhook scenarios — it causes scenario activation to fail with "Invalid interval." Scheduled (polling) scenarios should use `"indefinitely"` with an interval; webhook scenarios must use `"immediately"`.
-
-### Step 5: Activate the Scenario
-
-Newly created scenarios are **inactive** by default. Call `scenarios_activate` before attempting to run. Skipping this step causes `scenarios_run` to fail.
-
-### Step 6: Run & Verify
-
-Run the scenario and confirm it succeeds before handing off to the user.
-
-> Use the headless tools throughout this loop — `scenarios_run`, `executions_list`, `executions_get` — never their `show_*` counterparts (`show_scenarios_list`, `show_executions_list`, `show_execution_result`). The `show_*` tools render an interactive UI in the chat and exist only for when the user explicitly wants a run or its history displayed; calling them during automated diagnose-fix-retry iteration pops unnecessary UI on every pass. `scenarios_run`'s response already includes `status`/`outputs` once the run finishes, so no follow-up call is needed just to see the outcome — the checks below are for reading execution history and diagnosing failures, not for re-fetching what `scenarios_run` already returned.
-
-1. **Execute.** Call `scenarios_run` to trigger an immediate run.
-
-2. **Check the result.** Call `executions_list` for the scenario, then `executions_get` on the most recent execution. Inspect the `status` field:
-   - `1` = success — proceed to Step 7.
-   - `3` = error — continue to step 3.
-   - **`status: 1` alone is not proof the scenario produced correct data.** A module can complete without throwing and still hand downstream steps an empty or wrong value (e.g., an AI Agent module legitimately returning nothing for a given input) — Make's execution status reflects "did anything crash," not "is this output right." Inspect the actual output content before telling the user it worked; see the [Throw Module guard pattern](./error-handling.md#throw-module) for converting bad-data cases into real failures instead of silent successes.
-   - **If the first module is a webhook, `scenarios_run` does not reliably verify it in either direction.** See "Webhook Scenarios: Verifying via `scenarios_run` Is Unreliable" in Common App Gotchas before trusting this step's result for a webhook-triggered scenario.
-
-3. **Diagnose the failure.** Read `error.message` and `error.causeModule` from the execution result. Common runtime issues that pass schema validation:
-   - Mapped fields resolving to `undefined` or `null` at runtime (e.g., `{{2.mimeType}}` when the upstream module produced no output for that field)
-   - Type conversion errors on optional parameters left at defaults
-   - Missing or expired connection tokens
-
-4. **Fix and retry.** To update the scenario after diagnosis:
-   - Call `scenarios_deactivate` on the scenario
-   - Call `scenarios_update` with the corrected blueprint
-   - Call `scenarios_activate` to re-enable
-   - Call `scenarios_run` again and repeat from step 2
-
-Repeat the diagnose-fix-retry cycle until the execution succeeds or the issue requires user intervention (e.g., missing input data, external service unavailable). If user action is needed, explain the error and what to do before retrying.
-
-### Step 7: Provide the Scenario URL
-
-Always give the user the scenario URL after creation: `https://<zone>.make.com/<teamId>/scenarios/<scenarioId>` (uses team ID, not organization ID).
-
----
-
-## Core Concepts Reference
-
-When composing scenarios, consult these feature docs to understand how Make's building blocks work. Read the relevant files before using these features in a module composition.
-
-### Foundational
-- **[Bundles](./bundles.md)** — The unit of data flowing between modules. Understand bundle multiplicity before composing flows.
-- **[Mapping](./mapping.md)** — Connecting data between modules. Field mapping, data types, collections, arrays, functions/formulas.
-- **[Connections](./connections.md)** — Authenticating modules with external services. OAuth, API keys, connection reuse.
-
-### Triggers & Scenario Composition
-- **[Scheduling & Triggers](./scheduling-and-triggers.md)** — How scenarios start: instant triggers, polling triggers, schedules, manual/on-demand.
-- **[Webhooks](./webhooks.md)** — Instant triggers via HTTP endpoints. Custom webhooks and app-specific webhooks.
-- **[Subscenarios](./subscenarios.md)** — Parent/child scenario composition. Sync and async calls, inputs/outputs, reuse.
-
-### Data Flow Patterns
-- **[Iterations](./iterations.md)** — Processing arrays item-by-item. Implicit iterators, explicit Iterator, specialized iterators, Repeater.
-- **[Aggregations](./aggregations.md)** — Collapsing multiple bundles into one. Array, Text, Numeric, and Table aggregators.
-- **[Data Stores](./data-stores.md)** — Persistent key-value storage across scenario runs. Deduplication, state, cross-scenario data sharing.
-
-### Flow Control
-- **[Routing](./routing.md)** — Router module: multiple routes, multiple can fire, cannot merge back. Fallback routes.
-- **[Branching](./branching.md)** — If-Else module: mutually exclusive branches, can merge back.
-- **[Merging](./merging.md)** — Merge module: converges If-Else branches into single flow.
-- **[Filtering](./filtering.md)** — Input filters: pass/block bundles on conditions. Includes filter-vs-router decision guide.
-
-#### Router vs If-Else Decision Guide
-
-Choose **If-Else + Merge** when:
-- Branches are **mutually exclusive** (only one should run per bundle)
-- Branches need to **converge** into shared downstream modules (e.g., update a record, send a confirmation)
-- The logic follows an "if A, do X; else if B, do Y; else do Z" pattern
-
-Choose **Router** when:
-- **Multiple routes can fire** for the same bundle (e.g., log to Sheets AND alert on Slack)
-- Routes are **independent endpoints** with no shared follow-up steps
-- You need parallel processing paths that don't converge
-
-### Advanced
-- **[AI Agents](./ai-agents.md)** — Make AI Agents (New) with tool-calling. Module tools, scenario tools, MCP tools. Non-deterministic logic.
-- **[Error Handling](./error-handling.md)** — Error handlers per module (Break, Commit, Ignore, Resume, Rollback). Throw module. **Only suggest when user explicitly asks.**
-- **[Blueprint Construction](./blueprint-construction.md)** — Guidelines for building scenario blueprints programmatically via MCP.
-- **[Quick Patterns](./quick-patterns.md)** — Compressed MCP call chains for common one-shot scenarios (Slack message, Google Sheets, Airtable, email).
-
-## Common App Gotchas
-
-High-frequency configuration mistakes that cause silent failures or hard-to-diagnose runtime errors. Check these before finalizing module configuration in Phase 2 Step 2.
-
-### Google Sheets: `valueInputOption` Required for Write Modules
-
-`addRow` and `updateRow` always require `"valueInputOption": "USER_ENTERED"` in the **mapper** (not parameters). Without it, the API returns `400: INVALID_ARGUMENT — 'valueInputOption' is required`. There is no default — the field must be present:
-
-```json
-"mapper": {
-  "valueInputOption": "USER_ENTERED",
-  "values": { "0": "{{1.name}}", "1": "{{1.email}}" }
-}
-```
-
-`validate_module_configuration` will catch this if called — this is exactly why validation is mandatory per module.
-
-### Google Sheets: Spreadsheet IDs from `listSpreadsheets` RPC
-
-IDs returned by the `listSpreadsheets` RPC (e.g., `1abc123def456`) must be prefixed with `/` when placed in the `spreadsheetId` parameter for `mode: "select"` / `from: "drive"` modules:
-- Correct: `"/1abc123def456"`
-- Wrong: `"1abc123def456"`
-
-Only applies to select-mode. Map-mode accepts the raw ID.
-
-### Webhook Scenarios: Scheduling Type
-
-When the first module is a webhook (`gateway:CustomWebHook` or any instant trigger), always use `{"type": "immediately"}` for scheduling. Using `"indefinitely"` causes scenario activation to fail with "Invalid interval." See Step 4 above.
-
-### Webhook Scenarios: Verifying via `scenarios_run` Is Unreliable
-
-For a scenario whose first module is a webhook, `scenarios_run` does not faithfully exercise the real trigger path in either direction — treat both its input and its output as unavailable/unverified for this trigger type:
-
-- **Input.** The `data` you pass to `scenarios_run` is injected directly as the trigger module's output bundle, bypassing the webhook's actual request parsing (JSON-body/query-string merging, header/method capture, data-structure validation). A payload that works via `scenarios_run` may not match what a real HTTP POST produces, and vice versa.
-- **Output.** The scenario's declared output (`scenario-service:ReturnData` / the interface configured via `scenarios_set-interface`) is **not** surfaced in the `scenarios_run` response for a webhook-triggered scenario — even on a genuinely clean run, `outputs` comes back empty/absent, every time. This is separate from `Webhooks > Webhook response` (`gateway:WebhookRespond`), whose response only ever reaches a real inbound HTTP caller, never `scenarios_run` — see [Webhooks](./webhooks.md#gotchas).
-
-**To actually verify a webhook-triggered scenario end-to-end, don't have the agent fetch and relay the webhook URL.** A webhook URL is a bearer credential — whoever has it can invoke the scenario, and it's returned unredacted by `hooks_get`/`hooks_list` (unlike connection credentials, which are hidden from MCP entirely). Point the user at where to find it themselves (the scenario's trigger module in the Make UI, or their own `hooks_get` call outside this session) and have *them* send the real request (e.g. `curl`), rather than the agent retrieving it and echoing it back through this conversation.
-
-### Gmail / Google Email: `accountName` Is `"google-email"`, Not `"google"`
-
-The `google-email` app (Gmail) uses a **different** connection type than Google Sheets, Calendar, and Drive. When filtering `connections_list`:
-- Google Sheets / Calendar / Drive: `accountName: "google"`
-- Gmail (`google-email`): `accountName: "google-email"`
-
-A generic `"google"` OAuth connection will NOT work for Gmail modules (`google-email:sendAnEmail`, `google-email:TriggerNewEmail`). It lacks the required Gmail scopes and uses a different connection type entirely. Always verify via `extract_blueprint_components` that you have the correct connection type — do not assume all Google apps share one connection.
-
-### IML Date Boundaries: No `endOfDay()` / `startOfDay()` Functions
-
-IML does not have `endOfDay()`, `startOfDay()`, `beginningOfDay()`, or similar boundary functions. Attempting to use them produces an "Unknown function" error. To construct day boundaries, use `formatDate` to extract the date portion and concatenate a literal time:
-
-```
-Start of day: {{formatDate(now; "YYYY-MM-DD")}}T00:00:00Z
-End of day:   {{formatDate(now; "YYYY-MM-DD")}}T23:59:59Z
-```
-
-This is the one valid use of date + literal time concatenation. The general rule "never concatenate separate date and time strings" (see [IML Expressions](../make-module-configuring/iml-expressions.md)) applies to full ISO 8601 datetimes where both parts are dynamic — it does not prohibit combining a `formatDate` date-only result with a fixed literal time component.
-
-### Make AI Tools (`ai-tools:Ask`): Model Is Required, No Default
-
-The `model` parameter in `ai-tools:Ask` (and other Make AI Toolkit modules) is **required** — there is no default value. Omitting it causes a 400 error at runtime. When using Make's AI Provider (`ai-provider` connection), use tier slug names: `"small"`, `"medium"`, or `"large"`. (Older docs mention `low/medium/high` — these are stale; the runtime rejects them with `Model X not allowed for Make AI Provider`.) Only `small` is empirically verified for `ai-tools:Summarize` v2 as of 2026-05; the others follow Make UI conventions but should be confirmed via the Module dropdown. The dropdown labels surface as e.g. "SmallModel: gpt-5-nano. Reasoning: minimal." — match those slugs. Do not use provider-specific model IDs (e.g., `"gpt-4o-mini"`) with the Make AI Provider — they are not valid tier names and will fail. The `RpcGetModels` RPC currently fails through the MCP server (org-context bug), so the model list cannot be queried programmatically — inspect the UI dropdown if unsure. See [make-mcp-reference — Known MCP server bugs](../make-mcp-reference/SKILL.md#known-mcp-server-bugs) for the org-context bug.
-
-**No Make AI Provider connection?** If the user has no `ai-provider` connection and cannot create one, check `connections_list` for alternative AI provider connections (`openai-gpt-3`, `anthropic-claude`, `gemini-ai-*`) and use the corresponding app-specific module instead of `ai-tools:Ask`. These modules accept provider-specific model IDs. See [Blueprint Construction — AI Tools](./blueprint-construction.md) for details.
-
-## Official Documentation
-
-- [Create Your First Scenario](https://help.make.com/create-your-first-scenario)
-
-## Related Skills
-
-- **make-module-configuring** — HOW to configure each module: parameters, connections, mapping, webhooks, data stores, IML expressions, validation
-- **make-mcp-reference** — MCP server configuration, scopes, access control, and troubleshooting
+# Make scenarios — creating and editing
+
+The build chain on this surface is: **`app_find` → `module_spec` (→ `connection_create`/`connection_get`,
+`module_options_get` as needed) → `scenario_create`**, and then **`scenario_patch`** for every edit after that.
+Everything here writes to the user's Make account — read `make-scenario-reference`'s write-model and
+refusal-contract sections before using any of it.
+
+## Never guess module names
+
+`app_find` and `module_spec` exist because hallucinated module names are the most common blueprint-authoring
+failure. Call `app_find` with the user's own words describing the goal ("save email attachments," "post to
+Slack," "split into two paths") — not a guessed app name — and use the exact `"app:moduleName"` strings it
+returns. Never invent one, and never proceed to `scenario_create`/`scenario_patch` with a module name that
+didn't come from `app_find` or an existing scenario's own `scenario_get` output.
+
+`app_find` also returns the flow-control modules a scenario needs beyond straight-line apps: `builtin:BasicRouter`
+(every item goes down every arm), `builtin:BasicIfElse` (each item takes the first matching arm), `builtin:BasicMerge`
+(where if-else arms rejoin — place it immediately after the if-else), `builtin:BasicAggregator`,
+`builtin:BasicFeeder` (iterator), and the generic webhook trigger `gateway:CustomWebHook`. These are typed
+`flow_control` in `app_find`'s results, not tied to any one app, and are needed for anything past a linear
+chain of modules.
+
+**Filter never shows up in that list — it isn't a module.** It's a gate on any module's own `filter` field
+(set at creation via this schema below, or afterward via `scenario_patch`'s `set_filter`), not a step added to
+the flow. This matters because it's easy to reach for `BasicIfElse`/`BasicRouter` by habit once "conditional"
+is in the request, when the actual requirement is a plain gate:
+
+- **A single continue-or-stop condition with no alternate output for the non-matching case** ("only process if
+  status is new," "skip unless X") — use a `filter` on the module, not `BasicIfElse`/`BasicRouter`. A filter
+  makes the run genuinely incomplete/skipped when the condition fails; `BasicIfElse`/`BasicRouter` always
+  execute one arm or another and always complete, so they cannot produce that outcome no matter how the arms
+  are configured — including an "empty" arm meant to simulate skipping.
+- **The non-matching case also needs its own distinct output or action** — that's a real branch, not a gate.
+  Use `BasicIfElse` (+ `BasicMerge` to rejoin) when exactly one of several mutually exclusive arms should run;
+  use `BasicRouter` when more than one arm can independently fire with no convergence.
+
+## When an app offers more than one trigger, say why you picked one
+
+`app_find` regularly returns more than one plausible trigger for the same goal — a scoped polling trigger (e.g.
+Slack's "watch direct messages") alongside a broad instant trigger (e.g. Slack's generic "watch events"). Name
+the tradeoff as part of *proposing* the scenario, not only if the user later asks "why not a webhook": which one
+is instant vs. polling, how narrowly each is scoped to the request, and whether the broad option would need an
+added filter to match what the narrower trigger already does for free. Landing on the right choice silently
+still leaves the user unable to tell whether it was deliberate or accidental.
+
+## Before authoring, always call `module_spec`
+
+`module_spec` takes up to 8 `"app:moduleName"` strings at once — spec the whole planned scenario in one call,
+not one call per module. For each module it returns:
+
+- The field schema (`spec`) — parameter and mapper field names, types, constraints. Field names must be copied
+  verbatim into `scenario_create`/`scenario_patch` — there's no translation step, and a reformatted name is a
+  chance to get it wrong.
+- **`connection`**, when the module authenticates — critically, `connection.existing[]` lists the team's
+  connections that *already* satisfy this requirement, with usable ids. Check this before assuming a new
+  connection is needed; reuse an existing id as the module's connection parameter instead of starting an OAuth
+  flow the user doesn't need to repeat.
+- **`dynamicFields`** — fields whose valid values come from the connected account (a spreadsheet id, a channel
+  id) rather than something to type or guess. **This is the single most common friction point on this
+  surface**: these values are almost always opaque ids that cannot be inferred from what the user said in
+  plain language ("the Sales channel" is not `C0123ABC`). Never guess one — resolve it with
+  `module_options_get` first. If a field isn't listed under `dynamicFields`, it's *usually* a plain literal or
+  mapped expression as `spec` describes, and can be set directly — but a handful of modules have a known gap
+  where a genuinely account-dependent field is missing from `dynamicFields` anyway (see
+  [Common App Gotchas](./app-gotchas.md), e.g. Google Sheets' `spreadsheetId`/`sheetId`). Don't treat every
+  omission as license to guess a value for those; state the assumption or ask instead.
+- **`webhook`**, for instant triggers — `autoCreatable` (whether `scenario_create` can make the hook itself, or
+  the user has to create it in Make and hand over its id) and `payloadShape` (`"known"` — the app defines the
+  fields up front, mappable immediately; `"learned"` — nothing can be mapped until a real request has arrived,
+  which forces the gradual create-then-learn path below).
+
+Call `module_spec` on the chosen modules *before* committing to a plan, even during the `app_find` search turn
+— `app_find` doesn't say what a module needs to run, and a plan proposed before checking will regularly
+discover a missing auth step or an unresolvable field one turn too late.
+
+## Resolving a dynamic field: `module_options_get`
+
+One field per call, by design — this isn't a batchable "resolve everything" tool, and there's no array input.
+Required: `organizationId`/`teamId` (from `environment_get`), `module`, `field` (copied verbatim from
+`module_spec`'s `dynamicFields`), and `connectionId` (from
+`module_spec`'s `connection.existing`; if that list is empty, the fix is `connection_create` first, not a call
+here). When a field's options depend on another field already being set (e.g. picking a sheet inside a
+spreadsheet), pass the already-chosen values as `context`, keyed by the same field paths `module_spec` listed
+under `dependsOn` — set those fields first.
+
+Returns at most 25 options (`hasMore` says if more exist; narrow with `search`). **Set the field to an option's
+`value`, never its `label`** — the label is what the user sees, the value is what Make needs. An *empty*
+`options` array is not automatically "the account has nothing": if `dependsOn` comes back populated instead,
+a prerequisite field needs setting first — set it and retry, don't report the account as empty.
+
+## Getting a connection: `connection_create` / `connection_get`
+
+Credentials are never entered in the conversation. `connection_create` takes a `teamId` and a list of
+`{appName, moduleNames?}` (one request can cover several apps in one authorization link — don't create N
+requests for N apps when one link would do) and returns a `url` the user has to open themselves; nothing is
+connected until they finish there. Poll progress with `connection_get` only when the user says they've finished
+authorizing — there's no push signal, and a human browser flow takes minutes, so don't tight-poll it. Once a
+credential's `state` is `authorized`, its `connectionId` is what a module's connection parameter needs.
+
+## Creating a scenario: `scenario_create`
+
+Modules are described as a **flat list**, the same shape `scenario_get` reports back — never author a nested
+blueprint object. Each module gets a caller-chosen `id` (kept as sent — other modules reference it via
+`follows`/`parent`, and mapper values reference its output as `"{{<id>.field}}"` — see [Mapping](./mapping.md)
+for the full reference syntax). Exactly one module carries
+`root: "main"` (the trigger); every other module carries either `follows` (runs next in the same flow) or
+`parent` (starts a nested flow — a router arm, an if-else arm, an error handler, or an agent tool, with
+`kind`/`index`/`conditions`/`mergesTo` as appropriate). `scheduling` (required) and `interface` (optional) are
+top-level siblings, not nested inside a module — `scheduling.type` is dictated by the trigger chosen
+(`"immediately"` for a webhook, `"indefinitely"` with an `interval` for polling, `"on-demand"` for
+run-on-request, or a clock schedule). Using `"indefinitely"` for a webhook-triggered scenario fails activation
+with "Invalid interval" — a recognizable symptom of scheduling type mismatched to trigger kind, not a sign the
+webhook itself is misconfigured. `interface` only makes sense — and only accepts required inputs — on
+an on-demand scenario.
+
+The whole design is validated before anything is created, and refused with every problem at once if it doesn't
+pass — treat a populated `errors` array as an expected outcome, not a broken call: fix everything listed and
+resubmit, since nothing was written. `autoActivate: true` switches the scenario on immediately after a
+successful create; leave it off to let the user review first, and note its one real hazard: a freshly created
+webhook scenario maps against field names nobody has verified yet (see the learning flow below), so activating
+immediately means live traffic flowing into an unverified mapping.
+
+**When a trigger's webhook has `payloadShape: "learned"`** (from `module_spec`), don't try to build the whole
+scenario in one call — the field names to map don't exist yet:
+
+1. `scenario_create` with the trigger module alone.
+2. Have the user send one real request to the returned webhook URL (or use `scenario_trigger_learn` first if
+   nothing has been sent yet — see `make-scenario-operations`).
+3. Read the detected fields back (`scenario_trigger_inspect`).
+4. Add the rest of the modules with `scenario_patch`, now that real field names are known.
+
+This is one of exactly two points on this surface where a human has to act mid-build — the other is the OAuth
+consent flow above. Everywhere else, build the whole scenario in one call; there's no server-side draft to
+stage a multi-call edit in, so a scenario built in fragments is a live, runnable (if incomplete) scenario at
+every intermediate step.
+
+A polling trigger also has a starting point ("all," "from now on," "since a date") that this surface currently
+has no field for — a scenario created here always takes the platform default, which on a busy source can mean
+an unrequested backfill once activated. **Ask the user's replay preference before calling `scenario_create` for
+any polling trigger** — especially when they've said something like "new items only" — rather than waiting to
+see whether the created scenario happens to report a lint about it. If a lint appears anyway, treat it as
+confirmation to raise the question, not as the first time it's raised, and don't activate until the user has
+answered.
+
+**Building an on-demand scenario (a declared `interface` with no other trigger) has its own required shape** —
+the root module must be `scenario-service:StartSubscenario`, and the declared inputs are that module's own
+output bundle, referenced like any other module's output (`{{<id>.field}}`, never `{{input.x}}`). See
+[On-Demand Structure](./on-demand-structure.md) and [Mapping](./mapping.md) before building one; getting either
+part wrong produces a scenario that "runs successfully" with silently null outputs, not an error.
+
+## Editing a scenario: `scenario_patch`
+
+The only tool that edits an existing scenario, and — like `scenario_create` — it makes exactly one upstream
+write covering everything named in the call. Pass `expectedLastEdit` (the scenario's `lastEdit` from the most
+recent `scenario_get`); a stale value means someone else edited it since, and the call is refused — re-fetch
+and retry rather than forcing it. Seven operations, applied in order then validated and saved as one change:
+
+- **`add_module`** — same shape as `scenario_create`'s module entries, including `position` (`{after: moduleId}`
+  to insert into an existing flow, or `{parentModuleId, kind, index, ...}` to start/extend a nested flow).
+- **`remove_module`** — takes the module out; whatever ran after it now runs directly after what preceded it.
+  Its configuration is discarded, and any `{{<id>.field}}` reference to it elsewhere breaks — fix those
+  references in the *same* call, since a half-broken edit still gets validated as one whole.
+- **`set_module_config`** — **replaces**, never merges, a module's `parameters`/`mapper`. Read the module first
+  with `scenario_module_get`, apply the changes to the full object, and send the complete result back —
+  omitting the `parameters` property leaves it untouched, but sending `{}` means "no parameters." This is the
+  one place a whole-object write is the contract; there is no partial-update semantics to use instead.
+- **`set_filter`** — replaces a module's gate; send `{}` to remove it entirely. Filters are structure, not
+  configuration — `set_module_config` never touches them, matching the read-side split
+  (`scenario_get` reports filters, `scenario_module_get` doesn't).
+- **`set_scheduling`**, **`set_interface`**, **`rename`** — scenario-level declarations, each replacing the
+  side given (an `interface` operation replaces `input` or `output` independently — omit one to leave it
+  alone, send an empty list to remove it).
+
+A batch of several operations is free in one call (they're applied in memory and validated once before saving)
+— reconfiguring three modules is three operations in one call, not three calls. One `hook` (for adding/changing
+an app-trigger's webhook) is allowed per call: it always creates a new webhook and points the trigger at it,
+cleaning up the one used before where Make allows it.
+
+**An operation can't target a module `add_module` is adding in the same call** — the id a new module gets is
+assigned server-side and returned in `applied[].moduleId` after the save, not known before it. Wiring a filter
+or a follow-on module onto a module that doesn't exist yet is two calls: `add_module` first, then a second
+`scenario_patch` (with a fresh `expectedLastEdit`) once its real id is known.
+
+Read the response's `errors`/`warnings` the same way as `scenario_create`'s: a populated `errors` array means
+nothing was saved — fix and resubmit. `warnings` covers things that didn't block the save, including
+pre-existing problems the call didn't touch.
+
+## The refusal contract, in a build context
+
+If a planned edit would reference a data store, a custom IML function, or another entity this surface can't
+author (see `make-scenario-reference`), both write tools refuse by name before saving anything, pointing at
+the Make editor. Don't try to work around that refusal by omitting the reference and hoping it resolves at run
+time — relay it to the user as a hard boundary of this surface, not a bug to route around.
+
+## Common app gotchas
+
+Before finalizing a module's `parameters`/`mapper`, check [Common App Gotchas](./app-gotchas.md) — high-frequency
+mistakes (Google Sheets, Gmail, Make AI Tools, IML date functions) that pass `scenario_create`/`scenario_patch`
+validation cleanly and only surface as a runtime failure or a silent wrong-data write.
+
+## What this skill does not cover
+
+- Explaining an already-built scenario's structure — `make-scenario-explore`.
+- Running the scenario, checking on executions, or debugging a failure — `make-scenario-operations`.

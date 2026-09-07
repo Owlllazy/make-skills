@@ -36,24 +36,20 @@
   "agents": {
     "skills": [
       {
-        "name": "make-api-shell-connection-workflow",
-        "path": "./skills/make-api-shell-connection-workflow"
-      },
-      {
         "name": "make-scenario-building",
         "path": "./skills/make-scenario-building"
       },
       {
-        "name": "make-module-configuring",
-        "path": "./skills/make-module-configuring"
+        "name": "make-scenario-explore",
+        "path": "./skills/make-scenario-explore"
       },
       {
-        "name": "make-mcp-reference",
-        "path": "./skills/make-mcp-reference"
+        "name": "make-scenario-operations",
+        "path": "./skills/make-scenario-operations"
       },
       {
-        "name": "make-e2b-code-execution",
-        "path": "./skills/make-e2b-code-execution"
+        "name": "make-scenario-reference",
+        "path": "./skills/make-scenario-reference"
       }
     ]
   }

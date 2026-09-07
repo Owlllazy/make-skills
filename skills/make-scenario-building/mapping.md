@@ -1,92 +1,86 @@
 ---
 name: mapping
-description: Connecting data between modules — how to map fields from source modules to target module inputs.
+description: How data flows between modules using the flat module grammar — module ID references, the on-demand/webhook trigger-output special case, array indexing, and update-safety gotchas.
 ---
 
 # Mapping
 
-## What It Is
+## The rule
 
-Mapping is how you tell Make which data from one module should be used in another module's input fields. It connects the output of upstream modules to the input parameters of downstream modules — the core mechanism for passing data through a scenario.
+A module's `mapper` values are IML expressions referencing an **upstream module's output by that
+module's own `id`** — the same `id` you assigned it in the flat module list `scenario_create`/
+`scenario_patch` take.
 
-## When to Use It
+**Syntax:** `{{moduleId.fieldName}}`
 
-- Every time a module needs data from a previous module's output (which is almost always).
-- When transforming data between systems with different field names or formats.
-- When constructing dynamic values using functions and formulas.
+- `{{1.email}}` — the `email` field from the module with id 1
+- `{{3.items[1].name}}` — the first item's `name` in the `items` array from the module with id 3
+- `{{5.status}}` — the `status` field from the module with id 5
 
-## How It Works in Make
+There is no other reference form. In particular, **there is no `{{input.x}}` variable** — this is
+the single most common wrong guess, and it silently resolves to nothing rather than erroring.
 
-### Source and Target
+## The trigger-output special case (on-demand and webhook alike)
 
-- **Source module**: Any upstream module whose output bundle contains the data you need.
-- **Target module**: The downstream module whose input fields you're configuring.
+Whatever module holds `root: "main"` receives the run's injected data — a webhook's parsed payload,
+or an on-demand scenario's declared `interface.input` values — as **its own output bundle**. It is
+referenced exactly like any other module's output, by its own `id`: if `StartSubscenario` is id 1 and
+the scenario declares an input named `city`, the reference is `{{1.city}}`, not `{{input.city}}`,
+`{{trigger.city}}`, or a bare `{{city}}`. See [On-Demand Structure](./on-demand-structure.md) for why
+the root module has to be a real starter type for this to work at all.
 
-You can map data from any module that executed before the current one in the flow (not just the immediately preceding module).
+## Full bundle reference
 
-### Data Types in Bundles
+To pass an upstream module's **entire output** rather than one field, wrap the id in backticks:
+`` {{`1`}} ``. A bare `{{1}}` will not work — IML can't parse a bare numeric token. Use this when a
+field wants the whole object (e.g. JSON-stringifying a bundle, or an HTTP request body).
 
-| Type | Description | Example |
-|---|---|---|
-| **Text** | String values | `"John Doe"` |
-| **Number** | Numeric values | `42`, `3.14` |
-| **Boolean** | True/false | `true` |
-| **Date** | Date/time values | `2026-03-17T10:00:00Z` |
-| **Collection** | Object with named fields (mixed types) | `{ name: "John", age: 30 }` |
-| **Array** | Ordered list of same-type items | `["a", "b", "c"]` or `[{...}, {...}]` |
-| **Buffer** | Binary data (files) | File contents |
+## Discovering what's available to map
 
-### Collections and Arrays
+Call `module_spec` for every module, left to right, before writing its mapper — the fields it can
+map from are whatever upstream modules already declared as output.
 
-- A **collection** is like a record/object — it has named fields of potentially different types. Access fields with dot notation in mapping.
-- An **array** is a list of items. Arrays containing collections (array of objects) are common — e.g., a list of line items, a list of attachments.
-- To process array items individually, use an [Iterator](./iterations.md). To build an array from multiple bundles, use an [Aggregator](./aggregations.md).
+Some modules' outputs depend on their own configuration rather than being static (e.g. a Google
+Sheets trigger's row fields depend on which sheet is selected and what its header row contains) —
+`module_spec` reports these with an unresolved output schema
+(`{"allOf":[{"$ref":"…call module_options_get to resolve them…"}]}`), but **`module_options_get`
+only resolves dynamic *input* field options** (dropdown-style values keyed by a `dynamicFields[]`
+entry) — confirmed live against `google-sheets:watchRows`, whose `dynamicFields` lists only
+`parameters/sheetId`, nothing for the output. There is no equivalent on this surface to generic's
+`rpc_execute` output-RPC step: **a dynamic module's real output field names can't be pre-resolved
+before it runs.** Options in that situation: map by the module's commonly-known fields and verify
+with a real `scenario_run`, or build/run once and read the actual bundle back via
+`scenario_execution_module_get`, then fix the mapper if a field name guessed wrong.
 
-### Functions and Formulas
+## Building the mapper object
 
-Make provides built-in functions for transforming mapped values:
-
-- **String functions**: `lower`, `upper`, `trim`, `replace`, `substring`, `split`, `join`, `length`
-- **Numeric functions**: `ceil`, `floor`, `round`, `min`, `max`, `sum`, `average`
-- **Date functions**: `formatDate`, `parseDate`, `addDays`, `addHours`, `dateDifference`
-- **Array functions**: `map`, `get`, `first`, `last`, `length`, `contains`, `sort`, `slice`
-- **General**: `if`, `ifempty`, `switch`, `toString`, `toNumber`
-
-Functions can be nested: `{{upper(trim(1.field))}}`.
-
-## Flowchart Notation
-
-Mapping isn't shown explicitly in flowcharts — it's implicit in module connections. When relevant, note the mapped fields:
-
+```json
+{
+  "city": "{{1.city}}",
+  "greeting": "Hello, {{1.name}}!",
+  "status": "active",
+  "processedAt": "{{formatDate(now; \"YYYY-MM-DD\")}}"
+}
 ```
-Google Sheets - Search Rows → Slack - Send Message [text: {{row.name}} has status {{row.status}}]
-```
 
-## Example
-
-Mapping order data from Shopify to a Google Sheets row:
-
-```
-Shopify - Watch Orders
-  → Google Sheets - Add Row [
-      Column A: {{order.order_number}},
-      Column B: {{order.customer.email}},
-      Column C: {{order.total_price}},
-      Column D: {{formatDate(order.created_at, "YYYY-MM-DD")}}
-    ]
-```
+- **Mapped values** reference upstream output (`{{1.city}}`)
+- **Static values** are literal strings/numbers/booleans — valid in `mapper`, though check whether a
+  fixed value belongs in `parameters` instead
+- **Transformed values** apply IML functions to upstream data (`{{upper(1.name)}}`)
 
 ## Gotchas
 
-- **Bundle structure discovery.** If a module's mapping panel doesn't show expected fields, the module hasn't been run yet. Run the scenario once (or "Run this module only" on the source module) so Make learns the output structure. For instant triggers, you must manually provide data (e.g., submit a real response) to generate a testable bundle. For polling triggers, use the "Choose where to start" option.
-- **Array fields need iteration.** If you map an array field directly into a non-array input, you'll get the entire array as a single value. Use an Iterator to process items individually.
-- **Type coercion.** Make auto-coerces types in some cases (number to string, etc.), but explicit conversion with `toString()` or `toNumber()` is safer.
-- **Empty values.** Use `ifempty(value, fallback)` to provide defaults when a mapped field might be null/empty.
-- **Don't write empty strings into update mappers.** On any update, upsert, or patch module, omit fields you don't intend to write — including a field with an empty-string value (`""`) will silently overwrite the existing record value and look identical to "unmapped" in the visual editor. See [make-module-configuring → Field Omission on Updates and Upserts](../make-module-configuring/mapping.md#field-omission-on-updates-and-upserts).
-- **Source module identification.** In the Make UI, hovering over a mapped item causes the source module to pulse, making it easy to trace data origins.
+- **Array indexing is 1-based.** `{{1.items[1]}}` is the first item; index `0` will not work.
+- **Field omission on `set_module_config` updates.** `scenario_patch`'s `set_module_config` replaces
+  a module's whole `mapper`/`parameters` object — there is no partial-update semantics. When rebuilding
+  the object, omit a key entirely if you don't intend to touch it (particularly on update/upsert-style
+  action modules); sending `""` for a field writes an actual empty string and can erase existing data
+  downstream.
+- **Removing a module breaks references to it.** `scenario_patch`'s `remove_module` discards the
+  module's config; any `{{<id>.field}}` reference elsewhere pointing at it now dangles. Fix those
+  references in the same `scenario_patch` call — a half-broken edit still gets validated as one whole.
 
-## Official Documentation
+## See also
 
-- [Mapping](https://help.make.com/mapping)
-
-See also: [Bundles](./bundles.md) for the data flow model, [Iterations](./iterations.md) for processing arrays, [Filtering](./filtering.md) for conditions that use mapped values.
+[On-Demand Structure](./on-demand-structure.md) for the trigger-module requirement this reference
+syntax depends on.
