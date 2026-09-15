@@ -35,7 +35,7 @@ Skills and MCP server load automatically — nothing to configure manually.
 ```bash
 git clone https://github.com/integromat/make-skills.git
 claude
-/plugin add /path/to/make-skills
+/plugin add /path/to/make-skills/plugins/make-skills-claude
 ```
 
 ### Claude Cowork / Claude Chat
@@ -89,20 +89,29 @@ Copy the `skills/` directory into your agent's skills folder:
 
 ## MCP Server Setup
 
-The skills target Make's scenario-management MCP server. Add it to your agent's MCP configuration:
+Platform-specific OAuth endpoints:
 
-```json
-{
-  "mcpServers": {
-    "make": {
-      "type": "http",
-      "url": "https://mcp.make.com/v2"
-    }
-  }
-}
+| Platform | MCP URL |
+|----------|---------|
+| Claude Code | `https://mcp.make.com/claude` |
+| Cursor | `https://mcp.make.com/cursor` |
+| OpenAI Codex | `https://mcp.make.com/openai` |
+
+The Claude plugin at `plugins/make-skills-claude/` ships `.mcp.json` with the Claude endpoint. Manual registration:
+
+```bash
+claude mcp add --transport http make https://mcp.make.com/claude
+claude mcp list
 ```
 
-On first use, you'll authenticate through Make's OAuth consent screen. The server asks for one bundle of permissions and works only when every one of them is granted — if a tool answers with a permission error, reconnect and grant everything it asks for.
+On first use, authenticate through Make's OAuth consent screen. The server asks for one bundle of permissions and works only when every one of them is granted — if a tool answers with a permission error, reconnect and grant everything it asks for.
+
+Codex manual setup:
+
+```bash
+codex mcp add make --url https://mcp.make.com/openai
+codex mcp login make
+```
 
 ## Troubleshooting
 
