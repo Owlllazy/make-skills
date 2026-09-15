@@ -25,7 +25,7 @@ Give your AI coding agent deep Make expertise — for building, explaining, runn
 ```bash
 claude
 /plugin marketplace add integromat/make-skills
-/plugin install make-skills@make-marketplace
+/plugin install make@make-marketplace
 ```
 
 Skills and MCP server load automatically — nothing to configure manually.
@@ -58,7 +58,7 @@ Or download the [complete bundle](https://raw.githubusercontent.com/integromat/m
 codex plugin marketplace add integromat/make-skills
 ```
 
-Then open the plugin directory, select the **Make** marketplace, and install `make-skills`.
+Then open the plugin directory, select the **Make** marketplace, and install `make`.
 
 If the MCP server is not registered automatically after install, add it manually:
 
@@ -125,7 +125,7 @@ For Claude Code: run `claude --debug` for detailed MCP connection logs.
 
 ## Contributing
 
-Open pull requests against **`main`** — that's the trunk. Use squash merges and Conventional Commit PR titles (`feat:`, `fix:`, `docs:`, …), since release-please relies on them. A separate `latest` branch is fast-forwarded to each released tag; the Claude Code plugin installs its content from there, so `main` can carry reviewed-but-unreleased commits without affecting that channel. Codex and `npx skills add` still track `main` HEAD directly.
+Open pull requests against **`main`** — that's the trunk. Use squash merges and Conventional Commit PR titles (`feat:`, `fix:`, `docs:`, …), since release-please relies on them. A separate `latest` branch is fast-forwarded to each released tag. The Claude Code marketplace plugin content is pinned to the **`v2`** branch (`ref` in `.claude-plugin/marketplace.json`); switch that to `latest` when you want installs to track released tags only. Codex and `npx skills add` still resolve `main` HEAD directly. For Cursor Team Marketplace, import this repo and track branch **`v2`** (branch is not set in `.cursor-plugin/marketplace.json`).
 
 ## License
 
